@@ -25,15 +25,15 @@ Most scraping scripts are a single loop with a `requests.get()` call. This is th
          │                                │ - Bloom filters (BF.*)
          ▼                                │ - Domain locks (NX PX)
 ┌──────────────────┐                      └─────▲─────┘
-│   PostgreSQL DB   │                            │
-│  - pages (upsert) │◄──(Atomic UPSERT)─────┐    │ (pop URL, check
-│  - Analytics       │                      │    │  bloom filter,
-└──────────────────┘                  ┌─────┴────┴─────┐
-                                       │  N x Python     │
-                                       │  Worker Processes│
-                                       │  (asyncio pool  │
-                                       │   per process)  │
-                                       └─────────────────┘
+│   PostgreSQL DB  │                            │
+│  - pages (upsert)│◄──(Atomic UPSERT)─────┐    │ (pop URL, check
+│  - Analytics     │                       │    │  bloom filter,
+└──────────────────┘                   ┌─────┴────┴─────┐
+                                       │  N x Python    │
+                                       │Worker Processes│
+                                       │  (asyncio pool │
+                                       │   per process) │
+                                       └────────────────┘
 ```
 
 ## How It Works
