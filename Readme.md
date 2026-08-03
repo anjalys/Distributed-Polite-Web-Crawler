@@ -15,25 +15,18 @@ Most scraping scripts are a single loop with a `requests.get()` call. This is th
 ## Architecture
 
 ```
-┌─────────────────┐
-│ Streamlit UI     ├─(User enqueues Seed URL)─┐
-└────────┬─────────┘                          │
-         │                                    ▼
-    (Polls KPIs                          ┌───────────┐
-     & domain locks)                     │   REDIS   │
-         │                                │ - Frontier (ZSET)
-         │                                │ - Bloom filters (BF.*)
-         ▼                                │ - Domain locks (NX PX)
-┌──────────────────┐                      └─────▲─────┘
-│   PostgreSQL DB  │                            │
-│  - pages (upsert)│◄──(Atomic UPSERT)─────┐    │ (pop URL, check
-│  - Analytics     │                       │    │  bloom filter,
-└──────────────────┘                   ┌─────┴────┴─────┐
-                                       │  N x Python    │
-                                       │Worker Processes│
-                                       │  (asyncio pool │
-                                       │   per process) │
-                                       └────────────────┘
+┌──────────────────┐                  ┌──────────────────────────────┐                  ┌────────────────────────────┐
+│ Streamlit UI     │  enqueue seed URL│ REDIS                        │  pop URL, check  │ 5x Worker Processes        │
+│ (live dashboard) │  ───────────▶    │ - Frontier (ZSET)            │  ──────────▶     │ (asyncio pool per          │
+│                  │                  │ - Bloom filters (BF.*)       │  bloom + lock    │ process, N=MAX_WORKERS)    │
+└──────────────────┘  ◀───────────    │ - Domain locks (NX PX)       │  ◀──────────     │                            │
+                      poll live KPIs  │                              │  enqueue links   └────────────────────────────┘
+                                      └──────────────────────────────┘                                │
+                                                                                                      ▼
+                                                                                        ┌────────────────────────────┐
+                                                                                        │ PostgreSQL                 │
+                                                                                        │ pages (atomic UPSERT)      │
+                                                                                        └────────────────────────────┘
 ```
 
 ## How It Works
