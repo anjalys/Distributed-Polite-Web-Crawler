@@ -53,6 +53,19 @@ Measured locally against [quotes.toscrape.com](https://quotes.toscrape.com/) (de
 
 That ~0.88 pages/sec is *not* a concurrency ceiling — it's the politeness lock working as designed. Every one of those 25 workers is fighting over a single `lock:quotes.toscrape.com` key, so the whole cluster is intentionally throttled to roughly one request/second against that one domain, matching `POLITE_DELAY`. Point the same cluster at multiple domains and each gets its own independent lock, so throughput scales with domain count, not worker count.
 
+**Multi-domain run** — same 25-worker cluster, seeded with 28 distinct domains (`docs.python.org`, `developer.mozilla.org`, `books.toscrape.com`, etc.) instead of one, `depth_limit=1`:
+
+| Window | Pages | Rate |
+|---|---|---|
+| First ~10s (all 28 seed domains fetched in parallel) | 33 | 3.3 pages/sec |
+| Full 140s run (210 pages total) | 210 | 1.5 pages/sec sustained |
+
+The burst at the start is the lock-contention argument made visible: with 27+ distinct domains and 25 workers, almost every worker holds a *different* domain's lock simultaneously, so the fleet briefly moves at ~4x the single-domain rate with near-zero contention. It doesn't hold at ~4x, though — and the honest reason why is more interesting than the headline number: of the 27 domains actually crawled, 4 (`books.toscrape.com`, `developer.hashicorp.com`, `click.palletsprojects.com`, `developer.mozilla.org`) turned out to have deep enough internal link graphs to keep supplying new URLs, while the other 23 exhausted their in-scope links after just the seed page. Once the shallow domains ran dry, **effective concurrency collapsed from 27 domains down to the 4 still generating work** — worker count never changed, but the throughput ceiling did, because it's bounded by domains-with-active-backlog, not domains-in-the-original-seed-list. That's the real version of "throughput scales with domain count": it means *domains currently supplying work*, measured continuously, not the size of the seed list.
+
+![Dashboard during the multi-domain run](docs/dashboard_multidomain.png)
+
+*25 workers active, 3,532 URLs queued from the link-rich domains, 120 pages crawled at this point in the run.*
+
 **Bloom filter memory, measured directly with Redis `MEMORY USAGE`:**
 
 | Structure | Items | Memory |
