@@ -40,27 +40,20 @@ Most scraping scripts are a single loop with a `requests.get()` call. This is th
 
 ## Benchmark
 
-Measured locally against [quotes.toscrape.com](https://quotes.toscrape.com/) (default seed), Redis Stack, and Postgres 16 — not simulated.
+Measured locally with Redis Stack and Postgres 16 — not simulated. Two runs, same 25-worker cluster (5 processes × 5 async workers), different seed sets:
 
-**Crawl run** — 5 worker processes × 5 async workers each (25 concurrent), `depth_limit=3`, `polite_delay=1.0s`:
-
-| Metric | Result |
-|---|---|
-| Pages crawled | 168 |
-| Wall-clock time | 191.2s |
-| Effective throughput | 0.88 pages/sec |
-| Avg. extracted text per page | 999 chars |
-
-That ~0.88 pages/sec is *not* a concurrency ceiling — it's the politeness lock working as designed. Every one of those 25 workers is fighting over a single `lock:quotes.toscrape.com` key, so the whole cluster is intentionally throttled to roughly one request/second against that one domain, matching `POLITE_DELAY`. Point the same cluster at multiple domains and each gets its own independent lock, so throughput scales with domain count, not worker count.
-
-**Multi-domain run** — same 25-worker cluster, seeded with 28 distinct domains (`docs.python.org`, `developer.mozilla.org`, `books.toscrape.com`, etc.) instead of one, `depth_limit=1`:
-
-| Window | Pages | Rate |
+| | Run 1: single-domain | Run 2: multi-domain (28 seeds) |
 |---|---|---|
-| First ~10s (all 28 seed domains fetched in parallel) | 33 | 3.3 pages/sec |
-| Full 140s run (210 pages total) | 210 | 1.5 pages/sec sustained |
+| Target | [quotes.toscrape.com](https://quotes.toscrape.com/) only | 28 distinct domains (`docs.python.org`, `developer.mozilla.org`, `books.toscrape.com`, etc.) |
+| `depth_limit` | 3 | 1 |
+| Pages crawled | 168 | 210 |
+| Wall-clock time | 191.2s | ~140s |
+| Throughput | 0.88 pages/sec, flat the entire run | 3.3 pages/sec burst (first ~10s) → 1.5 pages/sec sustained |
+| Domain locks in play | 1 | up to 27 |
 
-The burst at the start is the lock-contention argument made visible: with 27+ distinct domains and 25 workers, almost every worker holds a *different* domain's lock simultaneously, so the fleet briefly moves at ~4x the single-domain rate with near-zero contention. It doesn't hold at ~4x, though — and the honest reason why is more interesting than the headline number: of the 27 domains actually crawled, 4 (`books.toscrape.com`, `developer.hashicorp.com`, `click.palletsprojects.com`, `developer.mozilla.org`) turned out to have deep enough internal link graphs to keep supplying new URLs, while the other 23 exhausted their in-scope links after just the seed page. Once the shallow domains ran dry, **effective concurrency collapsed from 27 domains down to the 4 still generating work** — worker count never changed, but the throughput ceiling did, because it's bounded by domains-with-active-backlog, not domains-in-the-original-seed-list. That's the real version of "throughput scales with domain count": it means *domains currently supplying work*, measured continuously, not the size of the seed list.
+**Run 1 proves the politeness lock works as designed.** All 25 workers were fighting over one key, `lock:quotes.toscrape.com` — no matter how many workers exist, only one can hold a given domain's lock at a time, so throughput pins near `1 ÷ polite_delay` regardless of worker count. That's not a concurrency ceiling, it's the feature.
+
+**Run 2 proves horizontal scaling works, but reveals a subtler bottleneck.** Spreading the seed across 28 domains means 27 independent lock keys, so workers stop contending and each holds a different domain's lock — hence the ~4x burst in the first 10 seconds. It didn't hold at 4x, though: of the 27 domains actually crawled, only 4 (`books.toscrape.com`, `developer.hashicorp.com`, `click.palletsprojects.com`, `developer.mozilla.org`) had deep enough internal link graphs to keep supplying new URLs. The other 23 exhausted their in-scope links after just the seed page and went idle. So partway through the run, **effective concurrency quietly collapsed from 27 active domains down to 4** — worker count never changed, but the throughput ceiling did, because it's bounded by *domains currently generating backlog*, not the size of the original seed list.
 
 ![Dashboard during the multi-domain run](docs/dashboard_multidomain.png)
 
