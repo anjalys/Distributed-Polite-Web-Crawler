@@ -165,6 +165,9 @@ class DistributedCrawler:
                 break
             except Exception as e:
                 logger.error(f"Worker {worker_id} ran into an error: {e}")
+                # Back off before retrying so a persistent failure (e.g. a
+                # connection pool issue) can't spin the loop at full speed.
+                await asyncio.sleep(1)
 
     async def crawl_page(self, session, url, depth):
         logger.info(f"Crawling [Depth {depth}]: {url}")

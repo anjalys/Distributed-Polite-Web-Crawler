@@ -1,3 +1,5 @@
+import asyncio
+
 import asyncpg
 import redis.asyncio as aioredis
 import src.config as config
@@ -11,7 +13,7 @@ class RedisManager:
             # Create a reusable pool
             self.pool = aioredis.ConnectionPool.from_url(
                 config.REDIS_URL,
-                max_connections=10,
+                max_connections=config.REDIS_MAX_CONNECTIONS,
                 decode_responses=True # Automatically decodes bytes to utf-8 strings
             )
         return aioredis.Redis(connection_pool=self.pool)
@@ -24,14 +26,19 @@ class RedisManager:
 class PostgresManager:
     def __init__(self):
         self.pool = None
+        self._pool_lock = asyncio.Lock()
 
     async def get_pool(self) -> asyncpg.Pool:
         if not self.pool:
-            self.pool = await asyncpg.create_pool(
-                dsn=config.POSTGRES_URL,
-                min_size=1,
-                max_size=10,
-            )
+            async with self._pool_lock:
+                # Re-check: another coroutine may have created it while we
+                # were waiting on the lock.
+                if not self.pool:
+                    self.pool = await asyncpg.create_pool(
+                        dsn=config.POSTGRES_URL,
+                        min_size=1,
+                        max_size=config.POSTGRES_POOL_MAX_SIZE,
+                    )
         return self.pool
 
     async def upsert_page(self, url, domain, depth, status_code, content_hash, title, text_content, char_count):
