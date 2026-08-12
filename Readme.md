@@ -40,24 +40,31 @@ Most scraping scripts are a single loop with a `requests.get()` call. This is th
 
 ## Benchmark
 
-Measured locally with Redis Stack and Postgres 16 — not simulated. Two runs, same 25-worker cluster (5 processes × 5 async workers), different seed sets:
+Measured locally with Redis Stack and Postgres 16 — not simulated. Three runs, different worker counts and seed sets:
 
-| | Run 1: single-domain | Run 2: multi-domain (28 seeds) |
-|---|---|---|
-| Target | [quotes.toscrape.com](https://quotes.toscrape.com/) only | 28 distinct domains (`docs.python.org`, `developer.mozilla.org`, `books.toscrape.com`, etc.) |
-| `depth_limit` | 3 | 1 |
-| Pages crawled | 168 | 210 |
-| Wall-clock time | 191.2s | ~140s |
-| Throughput | 0.88 pages/sec, flat the entire run | 3.3 pages/sec burst (first ~10s) → 1.5 pages/sec sustained |
-| Domain locks in play | 1 | up to 27 |
+| | Run 1: single-domain | Run 2: multi-domain, 25 workers | Run 3: multi-domain, 30 workers |
+|---|---|---|---|
+| Cluster | 5 processes × 5 async workers | 5 processes × 5 async workers | 1 process × 30 async workers |
+| Target | [quotes.toscrape.com](https://quotes.toscrape.com/) only | 28 distinct domains | same 28 domains |
+| `depth_limit` | 3 | 1 | 1 |
+| Pages crawled | 168 | 210 | 336 |
+| Wall-clock time | 191.2s | ~140s | ~188s |
+| Throughput | 0.88 pages/sec, flat the entire run | 3.3 pages/sec burst → 1.5 pages/sec sustained | 4.0 pages/sec burst → **1.5 pages/sec sustained** |
+| Domains that stayed busy | 1 | 4 of 27 crawled | 5 of 27 crawled |
 
 **Run 1 proves the politeness lock works as designed.** All 25 workers were fighting over one key, `lock:quotes.toscrape.com` — no matter how many workers exist, only one can hold a given domain's lock at a time, so throughput pins near `1 ÷ polite_delay` regardless of worker count. That's not a concurrency ceiling, it's the feature.
 
 **Run 2 proves horizontal scaling works, but reveals a subtler bottleneck.** Spreading the seed across 28 domains means 27 independent lock keys, so workers stop contending and each holds a different domain's lock — hence the ~4x burst in the first 10 seconds. It didn't hold at 4x, though: of the 27 domains actually crawled, only 4 (`books.toscrape.com`, `developer.hashicorp.com`, `click.palletsprojects.com`, `developer.mozilla.org`) had deep enough internal link graphs to keep supplying new URLs. The other 23 exhausted their in-scope links after just the seed page and went idle. So partway through the run, **effective concurrency quietly collapsed from 27 active domains down to 4** — worker count never changed, but the throughput ceiling did, because it's bounded by *domains currently generating backlog*, not the size of the original seed list.
 
+**Run 3 confirms it: adding workers doesn't move the needle once domain backlog is the bottleneck.** Same 28 domains, 20% more workers (30 vs. 25), a full 2x more total pages crawled over the longer window — but the *sustained rate* landed at exactly 1.5 pages/sec, identical to Run 2. One more domain stayed busy this time (5 instead of 4, and a different mix — `developer.mozilla.org` dominated here where `developer.hashicorp.com` had in Run 2), which is exactly the kind of variance you'd expect since "which domains happen to be link-rich" isn't something worker count controls. This run also validated a real fix: at `MAX_WORKERS=30` in a single process, a genuine async race condition in the Postgres pool's lazy initialization (multiple workers' first calls could each spawn their own `asyncpg.create_pool()` before any finished) surfaced and was fixed with an `asyncio.Lock`; this run completed 336 pages over ~188s with zero connection errors afterward.
+
 ![Dashboard during the multi-domain run](docs/dashboard_multidomain.png)
 
-*25 workers active, 3,532 URLs queued from the link-rich domains, 120 pages crawled at this point in the run.*
+*Run 2 — 25 workers active, 3,532 URLs queued from the link-rich domains, 120 pages crawled at this point in the run.*
+
+![Dashboard during the 30-worker run](docs/dashboard_maxworkers.png)
+
+*Run 3 — 30 workers active, 3,457 URLs queued, 74 pages crawled at this point, 2 domain locks held simultaneously.*
 
 **Bloom filter memory, measured directly with Redis `MEMORY USAGE`:**
 
